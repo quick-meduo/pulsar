@@ -21,12 +21,26 @@ if (NOT MSVC)
   set(CMAKE_C_FLAGS " -std=c99 ${CMAKE_C_FLAGS}")
 endif()
 
+set(Boost_USE_STATIC_LIBS ON)
+
+set(BOOST_INCLUDEDIR ${CMAKE_SOURCE_DIR}/boost)
+set(BOOST_LIBRARYDIR ${CMAKE_SOURCE_DIR}/boost)
+find_package(Boost 1.71.0 COMPONENTS iostreams program_options)
+
+if(Boost_FOUND)
+  include_directories(${Boost_INCLUDE_DIRS})
+  set(BOOST_LINK_LIBRARIES ${Boost_LIBRARIES})
+endif()
 set(SAMPLE_ASYNC_PRODUCER_SOURCES
   SampleAsyncProducer.cc
 )
 
 set(SAMPLE_CONSUMER_SOURCES
   SampleConsumer.cc
+)
+
+set(NTA_CONSUMER_SOURCES
+  NTAConsumer.cc
 )
 
 set(SAMPLE_CONSUMER_LISTENER_SOURCES
@@ -59,6 +73,7 @@ set(SAMPLE_READER_C_SOURCES
 
 add_executable(SampleAsyncProducer    ${SAMPLE_ASYNC_PRODUCER_SOURCES})
 add_executable(SampleConsumer         ${SAMPLE_CONSUMER_SOURCES})
+add_executable(NTAConsumer            ${NTA_CONSUMER_SOURCES})
 add_executable(SampleConsumerListener ${SAMPLE_CONSUMER_LISTENER_SOURCES})
 add_executable(SampleProducer         ${SAMPLE_PRODUCER_SOURCES})
 add_executable(SampleFileLogger       ${SAMPLE_FILE_LOGGER_SOURCES})
@@ -69,6 +84,7 @@ add_executable(SampleReaderCApi         ${SAMPLE_READER_C_SOURCES})
 
 target_link_libraries(SampleAsyncProducer    ${CLIENT_LIBS} pulsarShared)
 target_link_libraries(SampleConsumer         ${CLIENT_LIBS} pulsarShared)
+target_link_libraries(NTAConsumer         ${CLIENT_LIBS} pulsarShared ${BOOST_LINK_LIBRARIES})
 target_link_libraries(SampleConsumerListener ${CLIENT_LIBS} pulsarShared)
 target_link_libraries(SampleProducer         ${CLIENT_LIBS} pulsarShared)
 target_link_libraries(SampleFileLogger       ${CLIENT_LIBS} pulsarShared)

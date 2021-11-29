@@ -21,10 +21,6 @@ cmake_minimum_required(VERSION 3.4)
 project (pulsar-cpp)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake_modules")
 
-execute_process(COMMAND python ${CMAKE_SOURCE_DIR}/../src/gen-pulsar-version-macro.py OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE PVM)
-set(PVM_COMMENT "This is generated from Version.h.in by CMAKE. DO NOT EDIT DIRECTLY")
-configure_file(templates/Version.h.in include/pulsar/Version.h @ONLY)
-
 if (VCPKG_TRIPLET)
     message(STATUS "Use vcpkg, triplet is ${VCPKG_TRIPLET}")
     set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/vcpkg_installed/${VCPKG_TRIPLET}")
@@ -421,9 +417,6 @@ if (BUILD_DYNAMIC_LIB)
     add_subdirectory(examples)
 endif()
 
-if (BUILD_TESTS)
-    add_subdirectory(tests)
-endif()
 
 if (BUILD_PYTHON_WRAPPER)
     add_subdirectory(python)
