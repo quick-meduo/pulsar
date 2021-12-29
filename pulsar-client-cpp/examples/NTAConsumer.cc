@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <unistd.h>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -44,6 +45,7 @@ using namespace pulsar;
 std::string    pipe_file_name = "";
 bool           enabeDebug = false;
 std::string    pulsar_url = "";
+std::string    pulsar_topic = "";
 
 
 std::string& ltrim(std::string &s)
@@ -80,6 +82,53 @@ bool startsWith(std::string s, std::string sub){
 
 bool endsWith(std::string s,std::string sub){
     return s.rfind(sub)==(s.length()-sub.length())?true:false;
+}
+
+int next(std::string pkt,int state ,std::size_t *lpos, std::size_t *offset) {
+    std::string trimed = trim(pkt).substr(*lpos);
+
+    *offset = 0;
+    if(startsWith(trimed,"//")){
+        *lpos = std::string::npos;
+        *offset = std::string::npos;
+        return -2; //comments
+    }
+
+    //{A{B{C}C}E}
+    std::size_t lfound = trimed.find_first_of("{");
+    std::size_t rfound = trimed.find_first_of("}");
+
+    //XXX
+    if(std::string::npos == rfound && std::string::npos == lfound){
+        *offset = trimed.length();
+        return -1; //only contents
+    }
+
+    //XXX}
+    if(std::string::npos == lfound){
+        *offset = rfound + 1;
+        return 1; //}
+    }
+
+    //XXX{
+    if(std::string::npos == rfound){
+        *offset = lfound + 1;
+        return 0; //{
+    }
+
+    //XXX{}
+    if(lfound<rfound){
+        *offset = lfound + 1;
+        return 0; //{
+    }
+
+    //XXX}XX{
+    if(lfound>rfound){
+        *offset = rfound + 1;
+        return 1; //}
+    }
+
+    return state;
 }
 
 std::string compress(const std::string &data) {
@@ -128,6 +177,7 @@ void PrintHelp()
     std::cout <<
             "-p, --pipe <name>:       Input pipe name\n"
             "-d, --debug:             Enable debug\n"
+            "-t, --topic <non-persistent|persistent://<tenant>/<ns>/<topic>>:             pulsar Topic to send to\n"
             "-m, --pulsar <url>:      Set pulsar MQ address\n"
             "h|?, --help:              Show help\n";
     exit(1);
@@ -135,10 +185,11 @@ void PrintHelp()
 
 void ProcessArgs(int argc, char** argv)
 {
-    const char* const short_opts = "p:dm:h";
+    const char* const short_opts = "p:dt:m:h";
     const option long_opts[] = {
             {"pipe", required_argument, nullptr, 'p'},
-            {"debug", required_argument, nullptr, 'd'},
+            {"debug", no_argument, nullptr, 'd'},
+            {"topic", required_argument, nullptr, 't'},
             {"pulsar", required_argument, nullptr, 'm'},
             {"help", no_argument, nullptr, 'h'},
             {nullptr, no_argument, nullptr, 0}
@@ -159,6 +210,9 @@ void ProcessArgs(int argc, char** argv)
         case 'd':
             enabeDebug = true;
             break;
+        case 't':
+            pulsar_topic = std::string(optarg);
+            break;
         case 'm':
             pulsar_url = std::string(optarg);
             break;
@@ -168,6 +222,13 @@ void ProcessArgs(int argc, char** argv)
             PrintHelp();
             break;
         }
+    }
+}
+
+
+void callback(Result code, const MessageId& msgId) {
+    if(enabeDebug) {
+        LOG_INFO("Pular Recved code: " << code << " -- MsgID: " << msgId);
     }
 }
 
@@ -190,96 +251,137 @@ int main(int argc, char* args[]) {
        PrintHelp();
     }
 
+    if(pulsar_topic == ""){
+        pulsar_topic = "non-persistent://public/default/ntrafic";
+    }
+
     Client client(pulsar_url);
 
     Producer producer;
-    Result result = client.createProducer("non-persistent://public/default/my-topic", producer);
-    if (result != ResultOk) {
-        LOG_ERROR("Error creating producer: " << result);
-        return -1;
-    }
+
+    //Result result = client.createProducer(pulsar_topic, producer);
+    // if (result != ResultOk) {
+    //     LOG_ERROR("Error creating producer: " << result);
+    //     return -1;
+    // }
+    client.createProducer(pulsar_topic, producer);
 
     //initialize pipeline
     std::ifstream pipein(pipe_file_name);
     std::stringstream sstreamin;
-    std::string packet;
     std::vector<std::string> stack;
+    std::string packet;
+    int state = 0; //{ == 0, } == 1 BLANK -1
 
     while(true) 
     {
+        if ( pipein.fail() ){
+            pipein.close();
+            usleep(100);
+            pipein = std::ifstream(pipe_file_name);
+        }
+
         while(std::getline(pipein, packet)){
             packet = trim(packet);
-            
             if(startsWith(packet,"//")){
                 continue;
             }
 
-            if(startsWith(packet,"{") && stack.empty()){
-                size_t n = std::count(packet.begin(), packet.end(), '{');
-                for(int i=0;i<n;i++){
-                   stack.push_back("{");
-                }
-            } else if(contains(packet,"{") && !stack.empty()){
-                size_t n = std::count(packet.begin(), packet.end(), '{');
-                for(int i=0;i<n;i++){
-                   stack.push_back("{");
-                }
-            }
-
-            if(enabeDebug) {
-                LOG_INFO("Recved: " << packet <<"\n"); 
-                LOG_INFO("Status: " << stack.size() << " | " << sstreamin.str().size() <<"\n"); 
-            }
-
-            if(stack.empty()) {
-                sstreamin.clear();
-                sstreamin.str("");
-                continue;
-            }
-
-            if(sstreamin.str().size() > 200000){
+            if(sstreamin.str().size() > 200000){ //reset if size too big,robust way
                 sstreamin.clear();
                 sstreamin.str("");
                 stack.clear();
             }
 
-            sstreamin << trim(packet) << std::endl;
+            if(stack.empty() && !startsWith(packet,"{")){ //started only with a full package
+                sstreamin.clear();
+                sstreamin.str("");
+                continue;  
+            } 
 
-            if(contains(packet,"}")){
-                size_t n = std::count(packet.begin(), packet.end(), '}');
-                for(int i=0;i<n;i++){
-                   if(stack.empty()){
-                        sstreamin.clear();
-                        sstreamin.str("");
-                        break;
-                   } else {
-                        stack.pop_back();
-                        if(stack.empty()){
-                            std::string json_packet = sstreamin.str();
-                            if(endsWith(json_packet,"},\n")) {
-                                json_packet = json_packet.substr(0, json_packet.size()-2);
-                            }
-                            Message msg = MessageBuilder().setContent(compress(json_packet)).build();
-                            // Message msg = MessageBuilder().setContent((json_packet)).build();
-                            Result  res = producer.send(msg);
-                            
-                            if(enabeDebug){
-                                if(json_packet.length() > 100){
-                                   LOG_INFO("Message sent: " << res << "||\n" << json_packet.substr(0,100) << "\n ..... \n"<<json_packet.substr(json_packet.length()-100,json_packet.length())<< "\n");
-                                } else {
-                                   LOG_INFO("Message sent: " << res << "||\n" << json_packet << "\n"); 
-                                }
-                            }
+            std::size_t lpos = 0;
+            std::size_t offset = 0;
+            
+            if(enabeDebug) {
+                LOG_INFO("Recved: " << packet); 
+            }
 
-                            sstreamin.clear();
-                            sstreamin.str("");
+            while(true) {
+               state = next(packet, state, &lpos, &offset);
+               if(enabeDebug) {
+                    LOG_INFO("||state:" << state << " lpos:" << lpos << " offset:" << offset); 
+               }
+               
+               if (state == 0) {
+                    stack.push_back("{");
+                    sstreamin << packet.substr(lpos, offset);
+                    if(enabeDebug){
+                        LOG_INFO("||0:sstreamin:" << sstreamin.str()); 
+                    }
+               } else if (state == 1) {
+                    stack.pop_back();
+                    sstreamin << packet.substr(lpos, offset);
+                    if(enabeDebug){
+                        LOG_INFO("||1:sstreamin:" << sstreamin.str()); 
+                    }
+               } else if (state == -1) {
+                    sstreamin << packet.substr(lpos, offset);
+                    if(enabeDebug){
+                        LOG_INFO("||2:sstreamin:" << sstreamin.str()); 
+                    }
+               }
+
+               if(enabeDebug) {
+                    LOG_INFO("Status: " << stack.size() << " | " << sstreamin.str().size()); 
+               }
+
+               if(stack.empty()) {
+                    if(enabeDebug){
+                        LOG_INFO("||3:sstreamin:" << sstreamin.str()); 
+                    }
+                    
+                    std::string json_packet = sstreamin.str();
+                    if(endsWith(json_packet,"},\n")) {
+                        json_packet = json_packet.substr(0, json_packet.size()-2);
+                    }
+                    if(endsWith(json_packet,"},")) {
+                        json_packet = json_packet.substr(0, json_packet.size()-1);
+                    }
+
+                    if(json_packet.length() > 0) {
+                        Message msg = MessageBuilder().setContent(compress(json_packet)).build();
+                        producer.sendAsync(msg, callback);
+                        
+                        if(enabeDebug){
+                            if(json_packet.length() > 100){
+                                LOG_INFO("Message async sending queued: " << "||" << json_packet.substr(0,100) << "\n ..... \n"<<json_packet.substr(json_packet.length()-100,json_packet.length()));
+                            } else {
+                                LOG_INFO("Message async sending queued: " << "||" << json_packet); 
+                            }
                         }
                     }
+
+                    if(enabeDebug){
+                        LOG_INFO("||4:sstreamin:" << sstreamin.str()); 
+                    }
+
+                    sstreamin.clear();
+                    sstreamin.str("");
+                }else{
+                    // if(enabeDebug){
+                    //     LOG_INFO("||4:sstreamin:" << sstreamin.str()); 
+                    // }
                 }
+
+               lpos = lpos + offset;
+               if(lpos >= packet.length()) {
+                    break;
+               }
             }
+            sstreamin << std::endl;
         }
     }
     
     client.close();
-    // atexit(client.close());
+    pipein.close();
 }
